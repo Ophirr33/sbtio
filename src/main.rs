@@ -27,7 +27,7 @@ fn main() {
     match run() {
         Err(e) => {
             eprintln!("{}", e);
-            error!("{}", e);
+            error!("main: {}", e);
             exit(1);
         }
         Ok(()) => {
@@ -57,16 +57,17 @@ fn run() -> io::Result<()> {
     thread::Builder::new().name(RTHREAD.into()).spawn(move || {
         let stdin = io::stdin();
         let mut lock = stdin.lock();
-        if let Err(e) = copy_messages(&mut lock, &mut write_stream) {
-            error!("Could not copy message due to {}", e);
-            cleanup_conn(write_stream, read_sender);
+        if let Err(e) = copy_messages(&mut lock, &mut write_stream, RTHREAD) {
+            error!("{}: Could not copy message due to {}", RTHREAD, e);
+            cleanup_conn(write_stream, read_sender, RTHREAD);
         }
     })?;
     thread::Builder::new().name(WTHREAD.into()).spawn(move || {
         let stdout = io::stdout();
         let mut lock = stdout.lock();
-        if let Err(_) = copy_messages(&mut read_stream, &mut lock) {
-            cleanup_conn(read_stream, write_sender);
+        if let Err(e) = copy_messages(&mut read_stream, &mut lock, WTHREAD) {
+            error!("{}: Could not copy message due to {}", WTHREAD, e);
+            cleanup_conn(read_stream, write_sender, WTHREAD);
         }
     })?;
 
@@ -76,18 +77,25 @@ fn run() -> io::Result<()> {
     Ok(())
 }
 
-fn cleanup_conn(stream: Conn, sender: Sender<usize>) {
+fn cleanup_conn(stream: Conn, sender: Sender<usize>, thread_name: &str) {
     if let Err(e) = stream.shutdown(Shutdown::Both) {
-        error!("Could not shutdown stream {:?} due to {}", stream, e);
+        error!(
+            "{}: Could not shutdown stream {:?} due to {}",
+            thread_name, stream, e
+        );
     }
     sender.send(1).expect("Channel failure");
 }
 
-fn copy_messages<R: io::Read, W: io::Write>(read: &mut R, write: &mut W) -> io::Result<()> {
+fn copy_messages<R: io::Read, W: io::Write>(
+    read: &mut R,
+    write: &mut W,
+    thread_name: &str,
+) -> io::Result<()> {
     let mut reader = LspMessageReader::new(read);
     loop {
         let msg = reader.read_message()?;
         msg.write_into(write)?;
-        info!("Copying message {:?}", msg);
+        info!("{}: {:?}", thread_name, msg);
     }
 }

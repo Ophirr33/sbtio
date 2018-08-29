@@ -1,11 +1,10 @@
 use std::env::current_dir;
 use std::fmt;
 use std::fs::File;
-use std::io::{self, BufReader, ErrorKind, Read, Write};
-use std::mem;
+use std::io::{self, BufReader, Bytes, ErrorKind, Read, Write};
 use std::path::Path;
 
-use serde_json::{from_reader, from_slice, Value};
+use serde_json::{ from_reader, from_slice, Value };
 
 /// Searches upwards from the current directory to find `active.json`
 pub fn find_sbt_server_addr() -> io::Result<String> {
@@ -51,97 +50,119 @@ impl Active {
     }
 }
 
-#[derive(Debug)]
-pub struct LspMessageReader<R> {
-    headers: Option<Vec<u8>>,
-    unparsed_message: Vec<u8>,
-    inner: R,
-    pos: usize,
+pub struct LspMessageReader<R: io::Read> {
+    inner: Bytes<R>,
+    headers: Vec<u8>,
+    message: Vec<u8>,
 }
 
 impl<R: Read> LspMessageReader<R> {
     pub fn new(reader: R) -> Self {
         LspMessageReader {
-            inner: reader,
-            headers: None,
-            unparsed_message: Vec::with_capacity(256),
-            pos: 0,
+            inner: reader.bytes(),
+            headers: Vec::with_capacity(64),
+            message: Vec::with_capacity(64),
         }
     }
 
     pub fn read_message(&mut self) -> io::Result<LspMessage> {
-        let mut buf = [0; 256];
+        self.headers.clear();
+        self.message.clear();
+        self.parse_headers()?;
+        self.parse_message()?;
+        Ok(LspMessage::new(self.headers.clone(), self.message.clone()))
+    }
+
+    fn parse_headers(&mut self) -> io::Result<()> {
         loop {
-            match self.inner.read(&mut buf) {
-                Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e),
-                Ok(0) => {
-                    return Err(io::Error::new(
-                        ErrorKind::UnexpectedEof,
-                        "Could not read full lsp message",
-                    ))
-                }
-                Ok(n) => {
-                    self.unparsed_message.extend_from_slice(&mut buf[0..n]);
-                    if let Some(msg) = self.try_parse()? {
-                        return Ok(msg);
-                    }
-                }
+            let bo = self.inner.next();
+            let b = match self.match_byte(bo)? {
+                Some(b) => b,
+                None => continue
+            };
+            self.headers.push(b);
+            let len = self.headers.len();
+            if len >= 4 && &self.headers[len-4..] == &[b'\r', b'\n', b'\r', b'\n'] {
+                return Ok(());
             }
         }
     }
 
-    fn try_parse(&mut self) -> io::Result<Option<LspMessage>> {
-        if self.headers.is_none() {
-            self.try_headers();
-        }
-        if self.headers.is_none() {
-            return Ok(None);
-        }
-        match from_slice::<Value>(&self.unparsed_message[..]) {
-            Err(ref e) if e.is_eof() => Ok(None),
-            Err(e) => {
-                if e.is_syntax() && e.column() > 0 {
-                    // there's a chance the error is due to trailing characters
-                    // back off and try again before returning error
-                    let actual_bytes = self.unparsed_message.len() - e.column() - 1;
-                    if let Ok(_) = from_slice::<Value>(&self.unparsed_message[..actual_bytes]) {
-                        let mut headers = None;
-                        mem::swap(&mut headers, &mut self.headers);
-                        let msg = self.unparsed_message.drain(..actual_bytes).collect();
-                        return Ok(Some(LspMessage::new(headers.unwrap(), msg)));
-                    }
-                }
-                Err(io::Error::new(ErrorKind::InvalidData, e))
+    fn match_byte(&self, bo: Option<io::Result<u8>>) -> io::Result<Option<u8>> {
+        match bo {
+            None => {
+                error!("End of Buffer with {:?}", &self);
+                Err(io::Error::new(
+                    ErrorKind::UnexpectedEof,
+                    "Reached end of reader",
+                ))
             }
-            Ok(_) => {
-                let mut headers = None;
-                let mut msg = Vec::with_capacity(256);
-                mem::swap(&mut headers, &mut self.headers);
-                mem::swap(&mut msg, &mut self.unparsed_message);
-                Ok(Some(LspMessage::new(headers.unwrap(), msg)))
+            Some(Err(e)) => {
+                if e.kind() == ErrorKind::Interrupted {
+                    Ok(None)
+                } else {
+                    error!("Some error {:?} with {:?}", e, &self);
+                    Err(e)
+                }
+            },
+            Some(Ok(b)) => Ok(Some(b)),
+        }
+    }
+
+    fn parse_message(&mut self) -> io::Result<()> {
+        let mut brace_count = 0;
+        loop {
+            let bo = self.inner.next();
+            let b = match self.match_byte(bo)? {
+                Some(b) => b,
+                None => continue,
+            };
+            self.message.push(b);
+            match b {
+                b'{' => brace_count += 1,
+                b'}' => brace_count -= 1,
+                b'"' => self.parse_string()?,
+                _ => continue,
+            };
+            if brace_count > 0 {
+                continue;
+            }
+            if let Err(e) = from_slice::<Value>(&self.message[..]) {
+                return Err(io::Error::new(ErrorKind::InvalidData, e));
+            } else {
+                return Ok(());
             }
         }
     }
 
-    fn try_headers(&mut self) {
-        let p = self.pos;
-        for (idx, slice) in self.unparsed_message[p..]
-            .windows(4)
-            .enumerate()
-            .map(|(idx, slice)| (idx + p, slice))
-        {
-            if slice == &[b'\r', b'\n', b'\r', b'\n'] {
-                let mut vec = Vec::with_capacity(idx + 4);
-                vec.extend_from_slice(&self.unparsed_message[..idx + 4]);
-                self.headers = Some(vec);
-                self.pos = idx + 4;
+    fn parse_string(&mut self) -> io::Result<()> {
+        let mut escape = false;
+        loop {
+            let bo = self.inner.next();
+            let b = match self.match_byte(bo)? {
+                Some(b) => b,
+                None => continue,
+            };
+            self.message.push(b);
+            if escape {
+                escape = false;
+            } else if b == b'\\' {
+                escape = true;
+            } else if b == b'"' {
+                return Ok(());
             }
         }
-        if self.headers.is_some() {
-            self.unparsed_message.drain(..self.pos).for_each(|_| {});
-            self.pos = 0;
-        }
+    }
+}
+
+impl<R: io::Read> fmt::Debug for LspMessageReader<R> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "LspMessageReader({:?}, {:?})",
+            String::from_utf8_lossy(&self.headers[..]),
+            String::from_utf8_lossy(&self.message[..])
+        )
     }
 }
 
@@ -158,6 +179,7 @@ impl LspMessage {
     pub fn write_into<W: Write>(&self, w: &mut W) -> io::Result<()> {
         w.write_all(&self.headers)?;
         w.write_all(&self.message)?;
+        w.flush()?;
         Ok(())
     }
 }
