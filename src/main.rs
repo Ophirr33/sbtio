@@ -14,7 +14,7 @@ mod sbt;
 use conn::Conn;
 use sbt::{find_sbt_server_addr, LspMessageReader};
 
-use std::io;
+use std::io::{self, BufReader};
 use std::net::Shutdown;
 use std::process::exit;
 use std::sync::mpsc::{channel, Sender};
@@ -37,7 +37,7 @@ fn main() {
 }
 
 fn run() -> io::Result<()> {
-    syslog::init_unix(syslog::Facility::LOG_USER, log::LevelFilter::Info)
+    syslog::init_unix(syslog::Facility::LOG_USER, log::LevelFilter::Error)
         .map_err(|_| io::Error::new(io::ErrorKind::Other, "could not init syslog"))?;
 
     let sbt_socket_addr = find_sbt_server_addr()?;
@@ -92,7 +92,7 @@ fn copy_messages<R: io::Read, W: io::Write>(
     write: &mut W,
     thread_name: &str,
 ) -> io::Result<()> {
-    let mut reader = LspMessageReader::new(read);
+    let mut reader = LspMessageReader::new(BufReader::new(read));
     loop {
         let msg = reader.read_message()?;
         msg.write_into(write)?;
