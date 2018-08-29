@@ -1,0 +1,7 @@
++ Figure out spurious trailing characters bug
++ Figure out why vim isn't reacting to sbt messages
+Make logging not unix specific
+Tests
+CI
+Publish
+PROFIT

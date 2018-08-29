@@ -21,7 +21,8 @@ impl Conn {
         let url = Url::parse(url).map_err(|e| io::Error::new(invalid, e))?;
         let conn = match url.scheme() {
             "tcp" => {
-                let tcp = url.to_socket_addrs()?
+                let tcp = url
+                    .to_socket_addrs()?
                     .next()
                     .ok_or(io::Error::new(invalid, "Invalid tcp address"))
                     .and_then(TcpStream::connect)?;
