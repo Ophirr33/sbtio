@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::{self, BufReader, Bytes, ErrorKind, Read, Write};
 use std::path::Path;
 
-use serde_json::{from_reader, from_slice, Value};
+use serde_json::from_reader;
 
 /// Searches upwards from the current directory to find `active.json`
 pub fn find_sbt_server_addr() -> io::Result<String> {
@@ -127,11 +127,7 @@ impl<R: Read> LspMessageReader<R> {
             if brace_count > 0 {
                 continue;
             }
-            if let Err(e) = from_slice::<Value>(&self.message[..]) {
-                return Err(io::Error::new(ErrorKind::InvalidData, e));
-            } else {
-                return Ok(());
-            }
+            return Ok(());
         }
     }
 
